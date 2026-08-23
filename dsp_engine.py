@@ -5,13 +5,40 @@ from scipy.optimize import minimize, curve_fit
 from scipy.signal import find_peaks
 import nmrglue as ng
 
+# Comprehensive solvent chemical shift reference library (ppm)
 SOLVENT_TABLE = {
-    "CDCl3": {"1H": 7.26, "13C": 77.16, "water_1H": 1.56, "tol": 0.20},
-    "DMSO-d6": {"1H": 2.50, "13C": 39.52, "water_1H": 3.33, "tol": 0.20},
-    "Methanol-d4": {"1H": 3.31, "13C": 49.00, "water_1H": 4.87, "tol": 0.20},
-    "Acetone-d6": {"1H": 2.05, "13C": 29.84, "water_1H": 2.84, "tol": 0.20},
-    "D2O": {"1H": 4.79, "13C": None, "water_1H": 4.79, "tol": 0.25},
-    "CD3CN": {"1H": 1.94, "13C": 1.32, "water_1H": 2.13, "tol": 0.20}
+    "CDCl3": {
+        "1H": 7.26, "13C": 77.16, "water_1H": 1.56,
+        "1H_tol": 0.15, "13C_tol": 1.5
+    },
+    "DMSO-d6": {
+        "1H": 2.50, "13C": 39.52, "water_1H": 3.33,
+        "1H_tol": 0.15, "13C_tol": 1.5
+    },
+    "Methanol-d4": {
+        "1H": 3.31, "13C": 49.00, "water_1H": 4.87,
+        "1H_tol": 0.15, "13C_tol": 1.5
+    },
+    "Acetone-d6": {
+        "1H": 2.05, "13C": 29.84, "water_1H": 2.84,
+        "1H_tol": 0.15, "13C_tol": 1.5
+    },
+    "D2O": {
+        "1H": 4.79, "13C": None, "water_1H": 4.79,
+        "1H_tol": 0.25, "13C_tol": 0.0
+    },
+    "CD3CN": {
+        "1H": 1.94, "13C": 1.32, "water_1H": 2.13,
+        "1H_tol": 0.15, "13C_tol": 1.5
+    },
+    "Benzene-d6": {
+        "1H": 7.16, "13C": 128.06, "water_1H": 0.40,
+        "1H_tol": 0.15, "13C_tol": 1.5
+    },
+    "Pyridine-d5": {
+        "1H": 7.22, "13C": 123.87, "water_1H": 4.90,
+        "1H_tol": 0.20, "13C_tol": 1.5
+    }
 }
 
 def apply_phase(data: np.ndarray, p0: float, p1: float) -> np.ndarray:
@@ -43,8 +70,9 @@ def baseline_als(y: np.ndarray, lam: float = 1e6, p: float = 0.005, niter: int =
         w = p * (y > z) + (1 - p) * (y <= z)
     return z
 
-def process_fid(fid_data: np.ndarray, dic: dict, solvent: str = "CDCl3", nucleus: str = "1H") -> tuple:
-    sw = dic.get("sw", 4000.0)
+def process_fid(fid_data: np.ndarray, dic: dict, solvent: str = "CDCl3", nucleus: str = "1H", spec_freq_mhz: float = 400.0) -> tuple:
+    """Processes raw time-domain signals with nucleus-specific referencing."""
+    sw = dic.get("sw", spec_freq_mhz * 10.0)
     data_em = ng.proc_base.em(fid_data, lb=0.5 / sw)
     data_zf = ng.proc_base.zf(data_em, pad=len(data_em))
     complex_spec = ng.proc_base.fft(data_zf)
@@ -57,12 +85,14 @@ def process_fid(fid_data: np.ndarray, dic: dict, solvent: str = "CDCl3", nucleus
         uc = ng.fileiobase.unit_conversion(udic[0]['size'], udic[0]['complex'], udic[0]['sw'], udic[0]['obs'], udic[0]['car'])
         raw_ppm = uc.ppm_scale()
     except Exception:
-        raw_ppm = np.linspace(14.0, -2.0, len(corrected))
+        raw_ppm = np.linspace(14.0 if nucleus == "1H" else 230.0, -2.0, len(corrected))
 
     ref = SOLVENT_TABLE.get(solvent, SOLVENT_TABLE["CDCl3"])
-    target_ppm = ref.get(nucleus, 7.26)
+    target_ppm = ref.get(nucleus)
+    tol = ref.get(f"{nucleus}_tol", 0.2)
+
     if target_ppm is not None:
-        mask = (raw_ppm >= target_ppm - ref["tol"]) & (raw_ppm <= target_ppm + ref["tol"])
+        mask = (raw_ppm >= target_ppm - tol) & (raw_ppm <= target_ppm + tol)
         if np.any(mask):
             local_max = np.where(mask)[0][np.argmax(corrected[mask])]
             raw_ppm += (target_ppm - raw_ppm[local_max])
@@ -77,7 +107,7 @@ def filter_solvent_peaks(peaks: list, solvent: str = "CDCl3", nucleus: str = "1H
     clean = []
     for p in peaks:
         val = p["ppm"]
-        if s_ppm and abs(val - s_ppm) < 0.04:
+        if s_ppm and abs(val - s_ppm) < (0.04 if nucleus == "1H" else 0.5):
             continue
         if w_ppm and abs(val - w_ppm) < 0.06:
             continue
@@ -119,15 +149,17 @@ def extract_j_couplings(sub_peaks: list) -> tuple:
 
     return "m", [round(float(abs(freqs[-1] - freqs[0])), 2)], center_ppm
 
-def deconvolve_spectrum(ppm_axis: np.ndarray, spectrum: np.ndarray, spec_freq: float = 400.0) -> list:
-    threshold = np.max(spectrum) * 0.03
+def deconvolve_spectrum(ppm_axis: np.ndarray, spectrum: np.ndarray, spec_freq: float = 400.0, nucleus: str = "1H") -> list:
+    threshold = np.max(spectrum) * (0.03 if nucleus == "1H" else 0.05)
+    cluster_gap = 0.08 if nucleus == "1H" else 1.0
+    
     p_indices, _ = find_peaks(spectrum, height=threshold, distance=4)
     if len(p_indices) == 0:
         return []
 
     clusters, curr = [], [p_indices[0]]
     for i in range(1, len(p_indices)):
-        if abs(ppm_axis[p_indices[i]] - ppm_axis[p_indices[i-1]]) <= 0.08:
+        if abs(ppm_axis[p_indices[i]] - ppm_axis[p_indices[i-1]]) <= cluster_gap:
             curr.append(p_indices[i])
         else:
             clusters.append(curr)
