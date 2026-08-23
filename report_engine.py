@@ -37,7 +37,17 @@ class NumberedCanvas(canvas.Canvas):
         self.line(54, 46, letter[0] - 54, 46)
         self.restoreState()
 
-def build_pdf_report(sample_id: str, smiles: str, solvent: str, freq: str, df_1h: pd.DataFrame, df_13c: pd.DataFrame, img_buf: io.BytesIO) -> bytes:
+def build_pdf_report(
+    sample_id: str,
+    smiles: str,
+    solvent: str,
+    freq_1h: str,
+    freq_13c: str,
+    df_1h: pd.DataFrame,
+    df_13c: pd.DataFrame,
+    img_buf: io.BytesIO
+) -> bytes:
+    """Builds publication-grade PDF report with dual 1H and 13C spectrometer frequencies."""
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter, leftMargin=54, rightMargin=54, topMargin=54, bottomMargin=54)
     styles = getSampleStyleSheet()
@@ -49,9 +59,11 @@ def build_pdf_report(sample_id: str, smiles: str, solvent: str, freq: str, df_1h
 
     story = [Paragraph("Structure Elucidation & NMR Assignment Report", t_style), Spacer(1, 4)]
 
+    # Dual Frequency Metadata Block
     meta = [
         [Paragraph(f"<b>Sample ID:</b> {sample_id}", styles['Normal']), Paragraph(f"<b>Solvent:</b> {solvent}", styles['Normal'])],
-        [Paragraph(f"<b>SMILES:</b> {smiles}", styles['Normal']), Paragraph(f"<b>Spectrometer:</b> {freq}", styles['Normal'])]
+        [Paragraph(f"<b>SMILES:</b> {smiles}", styles['Normal']), Paragraph(f"<b>¹H Frequency:</b> {freq_1h}", styles['Normal'])],
+        [Paragraph(f"<b>Assignment Engine:</b> GNN + 2D Relaxation", styles['Normal']), Paragraph(f"<b>¹³C Frequency:</b> {freq_13c}", styles['Normal'])]
     ]
     t_meta = Table(meta, colWidths=[3.5 * inch, 3.5 * inch])
     t_meta.setStyle(TableStyle([
@@ -63,7 +75,7 @@ def build_pdf_report(sample_id: str, smiles: str, solvent: str, freq: str, df_1h
     ]))
     story.extend([t_meta, Spacer(1, 6)])
 
-    # Chemical Structure
+    # Chemical Structure Section
     story.append(Paragraph("1. Numbered Chemical Structure", s_style))
     story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#0B3C5D"), spaceAfter=6))
     img = Image(img_buf, width=3.2 * inch, height=2.4 * inch)
@@ -71,8 +83,8 @@ def build_pdf_report(sample_id: str, smiles: str, solvent: str, freq: str, df_1h
     t_img.setStyle(TableStyle([('ALIGN', (0,0), (-1,-1), 'CENTER')]))
     story.extend([t_img, Spacer(1, 6)])
 
-    # 1H Table
-    story.append(Paragraph("2. ¹H NMR Assignment Table", s_style))
+    # 1H NMR Assignment Table
+    story.append(Paragraph(f"2. ¹H NMR Spectroscopic Table ({solvent}, {freq_1h})", s_style))
     story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#0B3C5D"), spaceAfter=4))
     h_hdr = ["Atom", "Pred δ", "Exp δ", "Range", "Mult.", "Int.", "Status"]
     h_rows = [[Paragraph(h, h_style) for h in h_hdr]]
@@ -97,9 +109,9 @@ def build_pdf_report(sample_id: str, smiles: str, solvent: str, freq: str, df_1h
     ]))
     story.extend([t_h, Spacer(1, 8)])
 
-    # 13C Table
+    # 13C NMR Assignment Table
     story.append(KeepTogether([
-        Paragraph("3. ¹³C NMR Assignment Table", s_style),
+        Paragraph(f"3. ¹³C NMR Spectroscopic Table ({solvent}, {freq_13c})", s_style),
         HRFlowable(width="100%", thickness=1, color=colors.HexColor("#328CC1"), spaceAfter=4)
     ]))
     c_hdr = ["Atom", "Type", "Pred δ", "Exp δ", "Status"]
