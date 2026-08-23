@@ -7,86 +7,115 @@ def solve_assignment_2d(
     pred_c_df: pd.DataFrame,
     exp_1h_peaks: list,
     exp_13c_peaks: list,
-    topo_2d: dict,
+    topo_2d: dict = None,
     exp_cosy_peaks: list = None,
     exp_hmbc_peaks: list = None
 ) -> tuple:
-    # 1. 1H Matching Matrix
-    n_p = len(pred_h_df)
-    n_e = len(exp_1h_peaks)
-    dim_h = max(n_p, n_e)
-    cost_h = np.full((dim_h, dim_h), 35.0)
+    """Matches predicted vs experimental shifts via Hungarian algorithm with complete NaN safety."""
+    
+    # --- 1H Assignment ---
+    if pred_h_df.empty:
+        df_h_res = pd.DataFrame(columns=["Atom Label", "Pred δ (ppm)", "Exp δ (ppm)", "Range (ppm)", "Mult.", "Integral", "Status"])
+    else:
+        n_p = len(pred_h_df)
+        n_e = len(exp_1h_peaks) if exp_1h_peaks else 0
+        dim_h = max(n_p, n_e)
+        
+        if n_e == 0:
+            # Direct generation of unassigned predicted table
+            h_rows = [{
+                "Atom Label": r["Label"],
+                "Pred δ (ppm)": r["Shift"],
+                "Exp δ (ppm)": np.nan,
+                "Range (ppm)": "-",
+                "Mult.": r["Mult"],
+                "Integral": f"{r['Protons']}H",
+                "Status": "Predicted (Unmatched)"
+            } for _, r in pred_h_df.iterrows()]
+        else:
+            cost_h = np.full((dim_h, dim_h), 35.0)
+            for i in range(n_p):
+                p_shift = pred_h_df.iloc[i]["Shift"]
+                for j in range(n_e):
+                    diff = abs(p_shift - exp_1h_peaks[j]["ppm"])
+                    cost_h[i, j] = 2.0 * (diff ** 2)
 
-    for i in range(n_p):
-        p_row = pred_h_df.iloc[i]
-        for j in range(n_e):
-            diff = abs(p_row["Shift"] - exp_1h_peaks[j]["ppm"])
-            cost_h[i, j] = 2.0 * (diff ** 2)
+            r_h, c_h = linear_sum_assignment(cost_h)
+            h_rows = []
+            for r, c in zip(r_h, c_h):
+                if r < n_p:
+                    p_row = pred_h_df.iloc[r]
+                    if c < n_e:
+                        e_row = exp_1h_peaks[c]
+                        h_rows.append({
+                            "Atom Label": p_row["Label"],
+                            "Pred δ (ppm)": p_row["Shift"],
+                            "Exp δ (ppm)": e_row["ppm"],
+                            "Range (ppm)": e_row.get("range", f"{e_row['ppm']:.2f}"),
+                            "Mult.": e_row.get("multiplicity", p_row["Mult"]),
+                            "Integral": f"{p_row['Protons']}H",
+                            "Status": "Matched"
+                        })
+                    else:
+                        h_rows.append({
+                            "Atom Label": p_row["Label"],
+                            "Pred δ (ppm)": p_row["Shift"],
+                            "Exp δ (ppm)": np.nan,
+                            "Range (ppm)": "-",
+                            "Mult.": p_row["Mult"],
+                            "Integral": f"{p_row['Protons']}H",
+                            "Status": "Unassigned"
+                        })
 
-    r_h, c_h = linear_sum_assignment(cost_h)
-    h_rows = []
-    for r, c in zip(r_h, c_h):
-        if r < n_p:
-            p_row = pred_h_df.iloc[r]
-            if c < n_e:
-                e_row = exp_1h_peaks[c]
-                h_rows.append({
-                    "Atom Label": p_row["Label"],
-                    "Pred δ (ppm)": p_row["Shift"],
-                    "Exp δ (ppm)": e_row["ppm"],
-                    "Range (ppm)": e_row.get("range", f"{e_row['ppm']:.2f}"),
-                    "Mult.": e_row.get("multiplicity", p_row["Mult"]),
-                    "Integral": f"{p_row['Protons']}H",
-                    "Status": "Matched"
-                })
-            else:
-                h_rows.append({
-                    "Atom Label": p_row["Label"],
-                    "Pred δ (ppm)": p_row["Shift"],
-                    "Exp δ (ppm)": np.nan,
-                    "Range (ppm)": "-",
-                    "Mult.": p_row["Mult"],
-                    "Integral": f"{p_row['Protons']}H",
-                    "Status": "Unassigned"
-                })
+        df_h_res = pd.DataFrame(h_rows).sort_values(by="Pred δ (ppm)", ascending=False).reset_index(drop=True)
 
-    df_h_res = pd.DataFrame(h_rows).sort_values(by="Pred δ (ppm)", ascending=False).reset_index(drop=True)
+    # --- 13C Assignment ---
+    if pred_c_df.empty:
+        df_c_res = pd.DataFrame(columns=["Atom Label", "Type", "Pred δ (ppm)", "Exp δ (ppm)", "Status"])
+    else:
+        n_cp = len(pred_c_df)
+        n_ce = len(exp_13c_peaks) if exp_13c_peaks else 0
+        dim_c = max(n_cp, n_ce)
 
-    # 2. 13C Matching Matrix
-    n_cp = len(pred_c_df)
-    n_ce = len(exp_13c_peaks)
-    dim_c = max(n_cp, n_ce)
-    cost_c = np.full((dim_c, dim_c), 50.0)
+        if n_ce == 0:
+            c_rows = [{
+                "Atom Label": r["Label"],
+                "Type": "Quaternary" if r["IsQuat"] else "CH/CH2/CH3",
+                "Pred δ (ppm)": r["Shift"],
+                "Exp δ (ppm)": np.nan,
+                "Status": "Predicted (Unmatched)"
+            } for _, r in pred_c_df.iterrows()]
+        else:
+            cost_c = np.full((dim_c, dim_c), 50.0)
+            for i in range(n_cp):
+                p_shift = pred_c_df.iloc[i]["Shift"]
+                for j in range(n_ce):
+                    diff = abs(p_shift - exp_13c_peaks[j]["ppm"])
+                    cost_c[i, j] = 0.05 * (diff ** 2)
 
-    for i in range(n_cp):
-        p_row = pred_c_df.iloc[i]
-        for j in range(n_ce):
-            diff = abs(p_row["Shift"] - exp_13c_peaks[j]["ppm"])
-            cost_c[i, j] = 0.05 * (diff ** 2)
+            r_c, c_c = linear_sum_assignment(cost_c)
+            c_rows = []
+            for r, c in zip(r_c, c_c):
+                if r < n_cp:
+                    p_row = pred_c_df.iloc[r]
+                    if c < n_ce:
+                        e_row = exp_13c_peaks[c]
+                        c_rows.append({
+                            "Atom Label": p_row["Label"],
+                            "Type": "Quaternary" if p_row["IsQuat"] else "CH/CH2/CH3",
+                            "Pred δ (ppm)": p_row["Shift"],
+                            "Exp δ (ppm)": e_row["ppm"],
+                            "Status": "Matched"
+                        })
+                    else:
+                        c_rows.append({
+                            "Atom Label": p_row["Label"],
+                            "Type": "Quaternary" if p_row["IsQuat"] else "CH/CH2/CH3",
+                            "Pred δ (ppm)": p_row["Shift"],
+                            "Exp δ (ppm)": np.nan,
+                            "Status": "Unassigned"
+                        })
 
-    r_c, c_c = linear_sum_assignment(cost_c)
-    c_rows = []
-    for r, c in zip(r_c, c_c):
-        if r < n_cp:
-            p_row = pred_c_df.iloc[r]
-            if c < n_ce:
-                e_row = exp_13c_peaks[c]
-                c_rows.append({
-                    "Atom Label": p_row["Label"],
-                    "Type": "Quaternary" if p_row["IsQuat"] else "CH/CH2/CH3",
-                    "Pred δ (ppm)": p_row["Shift"],
-                    "Exp δ (ppm)": e_row["ppm"],
-                    "Status": "Matched"
-                })
-            else:
-                c_rows.append({
-                    "Atom Label": p_row["Label"],
-                    "Type": "Quaternary" if p_row["IsQuat"] else "CH/CH2/CH3",
-                    "Pred δ (ppm)": p_row["Shift"],
-                    "Exp δ (ppm)": np.nan,
-                    "Status": "Unassigned"
-                })
-
-    df_c_res = pd.DataFrame(c_rows).sort_values(by="Pred δ (ppm)", ascending=False).reset_index(drop=True)
+        df_c_res = pd.DataFrame(c_rows).sort_values(by="Pred δ (ppm)", ascending=False).reset_index(drop=True)
 
     return df_h_res, df_c_res
