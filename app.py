@@ -5,17 +5,13 @@ import matplotlib.pyplot as plt
 import nmrglue as ng
 from streamlit_ketcher import st_ketcher
 
-# Import local analytical and processing engines
-from dsp_engine import process_fid, filter_solvent_peaks, deconvolve_spectrum
+from dsp_engine import process_fid, filter_solvent_peaks, deconvolve_spectrum, SOLVENT_TABLE
 from chem_engine import analyze_and_number_molecule, draw_molecule_annotated
 from gnn_predictor import ShiftPredictor
 from assignment_engine import solve_assignment_2d
 from quantum_engine import solve_quantum_spin_system
 from report_engine import build_pdf_report
 
-# -----------------------------------------------------------------------------
-# PAGE CONFIGURATION & CACHED RESOURCES
-# -----------------------------------------------------------------------------
 st.set_page_config(
     page_title="AI NMR Structure Elucidation Platform",
     page_icon="🧪",
@@ -32,19 +28,54 @@ def load_gnn_model():
 predictor = load_gnn_model()
 
 # -----------------------------------------------------------------------------
-# SIDEBAR CONTROLS
+# SIDEBAR: SOLVENT & DUAL FIELD FREQUENCY SELECTION
 # -----------------------------------------------------------------------------
 with st.sidebar:
     st.header("Spectrometer Parameters")
+    
+    # 1. Solvent Selection
     solvent = st.selectbox(
         "Deuterated Solvent:",
-        ["CDCl3", "DMSO-d6", "Methanol-d4", "Acetone-d6", "D2O", "CD3CN"],
-        index=0
+        list(SOLVENT_TABLE.keys()),
+        index=0,
+        help="Select NMR solvent for automatic chemical shift calibration and solvent peak exclusion."
     )
-    freq = st.number_input("Field Frequency (MHz):", value=400.0, step=100.0, min_value=60.0, max_value=1200.0)
-    sample_id = st.text_input("Sample Identifier:", value="EXP-NMR-2026")
+    
+    # Display reference shifts for clarity
+    ref_data = SOLVENT_TABLE[solvent]
+    st.caption(f"Ref Shifts: ¹H = {ref_data['1H']} ppm | ¹³C = {ref_data['13C']} ppm")
     st.divider()
-    st.info("💡 **Workflow:**\n1. Draw / Input SMILES\n2. Ingest raw FID / Peaks\n3. Match shifts via Hungarian Algorithm\n4. Export Analytical PDF Report")
+
+    # 2. Field Frequencies Selection (Proton and Carbon)
+    st.subheader("Field Frequencies")
+    freq_1h = st.number_input(
+        "¹H Spectrometer Frequency (MHz):",
+        value=400.13,
+        step=50.0,
+        min_value=60.0,
+        max_value=1200.0,
+        format="%.2f"
+    )
+
+    # Carbon frequency: auto-calculated via gyromagnetic ratio (gamma_C / gamma_H ~ 0.25144)
+    auto_c_freq = round(freq_1h * 0.25144, 2)
+    sync_c = st.checkbox("Auto-link ¹³C Frequency (Larmor ratio)", value=True)
+
+    if sync_c:
+        freq_13c = auto_c_freq
+        st.info(f"¹³C Operating Frequency: **{freq_13c:.2f} MHz**")
+    else:
+        freq_13c = st.number_input(
+            "¹³C Spectrometer Frequency (MHz):",
+            value=auto_c_freq,
+            step=10.0,
+            min_value=15.0,
+            max_value=300.0,
+            format="%.2f"
+        )
+
+    st.divider()
+    sample_id = st.text_input("Sample Identifier:", value="EXP-NMR-2026")
 
 # -----------------------------------------------------------------------------
 # 1. MOLECULAR STRUCTURE INPUT & TOPICITY NUMBERING
@@ -60,13 +91,11 @@ input_mode = st.radio(
 
 if input_mode == "Draw with Ketcher":
     with st.expander("Molecular Structure Sketcher", expanded=True):
-        # Uses 'value=' parameter to maintain compatibility with streamlit-ketcher
         drawn = st_ketcher(value=default_smiles, height=400)
     active_smiles = drawn.strip() if drawn else default_smiles
 else:
     active_smiles = st.text_input("Enter Canonical SMILES:", value=default_smiles).strip()
 
-# Analyze chemical structure and compute topicity
 mol, mol_h, c_map, h_map, topo_2d, diastereotopic = analyze_and_number_molecule(active_smiles)
 
 if mol is None:
@@ -82,10 +111,10 @@ with col_v2:
     st.image(c_img, caption="¹³C Carbon Numbering Map", use_container_width=True)
 
 if diastereotopic:
-    st.warning(f"⚠️ **Diastereotopic Protons Detected:** {', '.join([f'{a}/{b}' for a, b in diastereotopic])} — will be resolved as distinct resonances.")
+    st.warning(f"⚠️ **Diastereotopic Protons Detected:** {', '.join([f'{a}/{b}' for a, b in diastereotopic])} — resolved as non-equivalent sites.")
 
 # -----------------------------------------------------------------------------
-# 2. SPECTROSCOPIC DATA INGESTION & AUTOMATED DECONVOLUTION
+# 2. SPECTROSCOPIC DATA INGESTION & DECONVOLUTION
 # -----------------------------------------------------------------------------
 st.subheader("2. Spectrum Processing & Automated Deconvolution")
 in_mode = st.radio(
@@ -100,21 +129,20 @@ exp_13c_peaks = []
 if in_mode == "Raw Spectrometer Data (JEOL .jdf)":
     up_fid = st.file_uploader("Upload JEOL Raw NMR Data (.jdf):", type=["jdf"])
     if up_fid:
-        with st.spinner("Executing FFT, Entropy-Based Autophasing & Whittaker Baseline Correction..."):
+        with st.spinner("Executing FFT, Entropy Autophasing & Baseline Correction..."):
             with open("temp.jdf", "wb") as f:
                 f.write(up_fid.getbuffer())
             dic, raw = ng.jeol.read("temp.jdf")
-            ppm_axis, spec = process_fid(raw, dic, solvent=solvent, nucleus="1H")
+            ppm_axis, spec = process_fid(raw, dic, solvent=solvent, nucleus="1H", spec_freq_mhz=freq_1h)
 
-        with st.spinner("Deconvolving overlapping sub-peaks and extracting J-couplings..."):
-            raw_multiplets = deconvolve_spectrum(ppm_axis, spec, spec_freq=freq)
+        with st.spinner(f"Deconvolving sub-peaks at {freq_1h:.1f} MHz and extracting J-couplings..."):
+            raw_multiplets = deconvolve_spectrum(ppm_axis, spec, spec_freq=freq_1h, nucleus="1H")
             exp_1h_peaks = filter_solvent_peaks(raw_multiplets, solvent=solvent, nucleus="1H")
 
-        st.success(f"✅ Extracted {len(exp_1h_peaks)} real multiplets after solvent and artifact filtering.")
+        st.success(f"✅ Extracted {len(exp_1h_peaks)} real multiplets after {solvent} artifact filtering.")
 
-        # Interactive Spectrum Plot with annotations
         fig, ax = plt.subplots(figsize=(10, 3.0), dpi=200)
-        ax.plot(ppm_axis, spec, color="#0B3C5D", lw=1.1, label="Processed Spectrum")
+        ax.plot(ppm_axis, spec, color="#0B3C5D", lw=1.1, label=f"Processed Spectrum ({freq_1h:.1f} MHz)")
         for p in exp_1h_peaks:
             ax.axvline(p["ppm"], color="#B82601", linestyle=":", alpha=0.5)
             ax.annotate(
@@ -128,7 +156,7 @@ if in_mode == "Raw Spectrometer Data (JEOL .jdf)":
                 color="#B82601",
                 fontweight="bold"
             )
-        ax.set_xlim(max(ppm_axis), min(ppm_axis))  # Invert NMR axis
+        ax.set_xlim(max(ppm_axis), min(ppm_axis))
         ax.set_xlabel("Chemical Shift δ (ppm)", fontweight="bold", fontsize=8)
         ax.set_ylabel("Intensity (a.u.)", fontsize=8)
         ax.grid(True, linestyle="--", alpha=0.3)
@@ -142,6 +170,7 @@ if in_mode == "Raw Spectrometer Data (JEOL .jdf)":
 else:
     col_p1, col_p2 = st.columns(2)
     with col_p1:
+        st.markdown(f"**¹H Peaks ({solvent}, {freq_1h:.1f} MHz)**")
         h_raw = st.text_area(
             "¹H Peaks (ppm, comma-separated):",
             "11.00, 8.12, 7.62, 7.35, 7.15, 2.35"
@@ -152,6 +181,7 @@ else:
                 for x in h_raw.split(",") if x.strip()
             ]
     with col_p2:
+        st.markdown(f"**¹³C Peaks ({solvent}, {freq_13c:.1f} MHz)**")
         c_raw = st.text_area(
             "¹³C Peaks (ppm, comma-separated):",
             "170.1, 169.8, 151.2, 134.8, 132.4, 126.1, 123.9, 122.2, 20.9"
@@ -167,28 +197,25 @@ else:
 # -----------------------------------------------------------------------------
 st.subheader("3. Structure Elucidation & Assignment Matrices")
 
-# Predict shifts via Graph Neural Network
 h_pred, c_pred = predictor.predict(mol_h, c_map, h_map, solvent=solvent)
-
-# Solve optimal bipartite matching
 df_1h_res, df_13c_res = solve_assignment_2d(h_pred, c_pred, exp_1h_peaks, exp_13c_peaks, topo_2d)
 
 col_t1, col_t2 = st.columns(2)
 with col_t1:
-    st.markdown(f"**¹H NMR Elucidation Matrix ({solvent}, {freq:.0f} MHz)**")
+    st.markdown(f"**¹H NMR Assignment Table ({solvent}, {freq_1h:.1f} MHz)**")
     st.dataframe(df_1h_res, use_container_width=True)
 with col_t2:
-    st.markdown(f"**¹³C NMR Elucidation Matrix ({solvent})**")
+    st.markdown(f"**¹³C NMR Assignment Table ({solvent}, {freq_13c:.1f} MHz)**")
     st.dataframe(df_13c_res, use_container_width=True)
 
 # -----------------------------------------------------------------------------
-# 4. QUANTUM MECHANICAL SPIN SYSTEM SIMULATOR (EXPANDER)
+# 4. QUANTUM MECHANICAL SPIN SIMULATOR
 # -----------------------------------------------------------------------------
 with st.expander("🔬 Quantum Mechanical Spin System Simulator (AB / ABX Systems)", expanded=False):
-    st.caption("Simulates second-order strong coupling effects (the roof effect) by diagonalizing the isotropic spin Hamiltonian matrix.")
+    st.caption("Simulates second-order strong coupling (roof effect) using the isotropic Hamiltonian.")
     qc1, qc2 = st.columns([1, 2])
     with qc1:
-        q_shifts = st.text_input("Coupled Chemical Shifts δ (ppm):", "3.00, 3.03")
+        q_shifts = st.text_input("Coupled Spins δ (ppm):", "3.00, 3.03")
         q_j = st.number_input("Coupling Constant J (Hz):", value=14.0, step=1.0)
     with qc2:
         try:
@@ -197,7 +224,7 @@ with st.expander("🔬 Quantum Mechanical Spin System Simulator (AB / ABX System
             if len(s_list) == 2:
                 j_m[0, 1] = j_m[1, 0] = q_j
             
-            trans, q_ppm, q_spec = solve_quantum_spin_system(s_list, j_m, spec_freq=freq)
+            trans, q_ppm, q_spec = solve_quantum_spin_system(s_list, j_m, spec_freq=freq_1h)
             
             fig_q, ax_q = plt.subplots(figsize=(6, 2.0), dpi=160)
             ax_q.plot(q_ppm, q_spec, color="#0B3C5D", lw=1.2)
@@ -222,7 +249,8 @@ if st.button("📄 Generate Analytical PDF Report", type="primary", use_containe
                 sample_id=sample_id,
                 smiles=active_smiles,
                 solvent=solvent,
-                freq=f"{freq:.1f} MHz",
+                freq_1h=f"{freq_1h:.2f} MHz",
+                freq_13c=f"{freq_13c:.2f} MHz",
                 df_1h=df_1h_res,
                 df_13c=df_13c_res,
                 img_buf=h_img
