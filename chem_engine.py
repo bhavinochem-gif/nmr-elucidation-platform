@@ -1,6 +1,6 @@
 from io import BytesIO
+import pandas as pd
 from rdkit import Chem
-from rdkit.Chem import AllChem
 from rdkit.Chem.Draw import rdMolDraw2D
 
 def classify_topicity(mol_h, h1_idx: int, h2_idx: int) -> str:
@@ -18,6 +18,17 @@ def classify_topicity(mol_h, h1_idx: int, h2_idx: int) -> str:
         return "Diastereotopic"
     return "Enantiotopic"
 
+def count_vicinal_protons(mol_h, parent_atom_idx: int) -> int:
+    """Counts vicinal protons (3 bonds away) for n+1 multiplicity estimation."""
+    parent = mol_h.GetAtomWithIdx(parent_atom_idx)
+    vicinal_h = 0
+    for nbr in parent.GetNeighbors():
+        if nbr.GetSymbol() == 'C':
+            for h in nbr.GetNeighbors():
+                if h.GetSymbol() == 'H' and h.GetIdx() != parent_atom_idx:
+                    vicinal_h += 1
+    return vicinal_h
+
 def analyze_and_number_molecule(smiles: str):
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
@@ -28,30 +39,38 @@ def analyze_and_number_molecule(smiles: str):
 
     c_map, h_map, diastereotopic = {}, {}, []
     c_count = 1
+    
+    # 1. Number Carbons
     for a in mol_h.GetAtoms():
         if a.GetSymbol() == "C":
             c_map[a.GetIdx()] = f"C{c_count}"
             c_count += 1
 
-    for a in mol_h.GetAtoms():
-        if a.GetSymbol() != "C":
-            continue
-        c_lbl = c_map[a.GetIdx()]
-        h_nbrs = [n.GetIdx() for n in a.GetNeighbors() if n.GetSymbol() == "H"]
+    # 2. Number and group Protons
+    mult_names = {0: "s", 1: "d", 2: "t", 3: "q", 4: "quin", 5: "sex", 6: "m"}
 
-        if len(h_nbrs) == 2:
-            if classify_topicity(mol_h, h_nbrs[0], h_nbrs[1]) == "Diastereotopic":
+    for a in mol_h.GetAtoms():
+        if a.GetSymbol() == "C":
+            c_lbl = c_map[a.GetIdx()]
+            h_nbrs = [n.GetIdx() for n in a.GetNeighbors() if n.GetSymbol() == "H"]
+            
+            # Check for diastereotopic methylene protons
+            if len(h_nbrs) == 2 and classify_topicity(mol_h, h_nbrs[0], h_nbrs[1]) == "Diastereotopic":
                 h_map[h_nbrs[0]] = f"{c_lbl}-Ha"
                 h_map[h_nbrs[1]] = f"{c_lbl}-Hb"
                 diastereotopic.append((f"{c_lbl}-Ha", f"{c_lbl}-Hb"))
             else:
-                h_map[h_nbrs[0]] = f"{c_lbl}-H"
-                h_map[h_nbrs[1]] = f"{c_lbl}-H"
-        else:
+                # Homotopic / equivalent protons (e.g. C1-H methyl group)
+                for idx in h_nbrs:
+                    h_map[idx] = f"{c_lbl}-H"
+                    
+        elif a.GetSymbol() in ("O", "N", "S"):
+            # Heteroatom protons (-OH, -NH)
+            h_nbrs = [n.GetIdx() for n in a.GetNeighbors() if n.GetSymbol() == "H"]
             for idx in h_nbrs:
-                h_map[idx] = f"{c_lbl}-H"
+                h_map[idx] = f"{a.GetSymbol()}-H"
 
-    # Extract 2D NMR correlation topology
+    # 3. Extract 2D NMR correlation topology
     dist = Chem.GetDistanceMatrix(mol_h)
     topo_2d = {"HSQC": [], "COSY": [], "HMBC": []}
 
