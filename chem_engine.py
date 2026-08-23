@@ -1,5 +1,4 @@
 from io import BytesIO
-import pandas as pd
 from rdkit import Chem
 from rdkit.Chem.Draw import rdMolDraw2D
 
@@ -17,17 +16,6 @@ def classify_topicity(mol_h, h1_idx: int, h2_idx: int) -> str:
     if len(Chem.FindMolChiralCenters(m_a, includeUnassigned=True)) > 1:
         return "Diastereotopic"
     return "Enantiotopic"
-
-def count_vicinal_protons(mol_h, parent_atom_idx: int) -> int:
-    """Counts vicinal protons (3 bonds away) for n+1 multiplicity estimation."""
-    parent = mol_h.GetAtomWithIdx(parent_atom_idx)
-    vicinal_h = 0
-    for nbr in parent.GetNeighbors():
-        if nbr.GetSymbol() == 'C':
-            for h in nbr.GetNeighbors():
-                if h.GetSymbol() == 'H' and h.GetIdx() != parent_atom_idx:
-                    vicinal_h += 1
-    return vicinal_h
 
 def analyze_and_number_molecule(smiles: str):
     mol = Chem.MolFromSmiles(smiles)
@@ -47,8 +35,7 @@ def analyze_and_number_molecule(smiles: str):
             c_count += 1
 
     # 2. Number and group Protons
-    mult_names = {0: "s", 1: "d", 2: "t", 3: "q", 4: "quin", 5: "sex", 6: "m"}
-
+    hetero_count = {"O": 1, "N": 1, "S": 1}
     for a in mol_h.GetAtoms():
         if a.GetSymbol() == "C":
             c_lbl = c_map[a.GetIdx()]
@@ -60,15 +47,16 @@ def analyze_and_number_molecule(smiles: str):
                 h_map[h_nbrs[1]] = f"{c_lbl}-Hb"
                 diastereotopic.append((f"{c_lbl}-Ha", f"{c_lbl}-Hb"))
             else:
-                # Homotopic / equivalent protons (e.g. C1-H methyl group)
                 for idx in h_nbrs:
                     h_map[idx] = f"{c_lbl}-H"
                     
         elif a.GetSymbol() in ("O", "N", "S"):
-            # Heteroatom protons (-OH, -NH)
+            sym = a.GetSymbol()
             h_nbrs = [n.GetIdx() for n in a.GetNeighbors() if n.GetSymbol() == "H"]
             for idx in h_nbrs:
-                h_map[idx] = f"{a.GetSymbol()}-H"
+                h_map[idx] = f"{sym}{hetero_count[sym]}-H"
+            if h_nbrs:
+                hetero_count[sym] += 1
 
     # 3. Extract 2D NMR correlation topology
     dist = Chem.GetDistanceMatrix(mol_h)
@@ -90,7 +78,7 @@ def analyze_and_number_molecule(smiles: str):
     return mol, mol_h, c_map, h_map, topo_2d, diastereotopic
 
 def draw_molecule_annotated(mol, atom_labels: dict) -> BytesIO:
-    drawer = rdMolDraw2D.MolDraw2DCairo(550, 400)
+    drawer = rdMolDraw2D.MolDraw2DCairo(600, 420)
     opts = drawer.drawOptions()
     opts.clearBackground = True
     opts.bondLineWidth = 2
