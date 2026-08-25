@@ -38,32 +38,54 @@ def autophase_entropy(complex_spec: np.ndarray) -> np.ndarray:
     return np.real(apply_phase(complex_spec, res.x[0], res.x[1]))
 
 def baseline_als(y: np.ndarray, lam: float = 1e6, p: float = 0.005, niter: int = 10) -> np.ndarray:
-    L = len(y)
-    D = sp.diags([1, -2, 1], [0, 1, 2], shape=(L - 2, L), format="csc")
-    w = np.ones(L)
+    """
+    Whittaker baseline estimation using Asymmetric Least Squares smoothing.
+    Corrected sparse matrix dimensions: D is (L-2, L), D.T.dot(D) is (L, L).
+    """
+    y_arr = np.asarray(y, dtype=np.float64).flatten()
+    L = len(y_arr)
+    if L < 3:
+        return np.zeros_like(y_arr)
+
+    # D is (L-2, L), so D.T @ D is (L, L) matching W
+    D = sp.diags([1.0, -2.0, 1.0], [0, 1, 2], shape=(L - 2, L), format="csc")
+    D_T_D = D.T.dot(D)
+
+    w = np.ones(L, dtype=np.float64)
     for _ in range(niter):
         W = sp.spdiags(w, 0, L, L, format="csc")
-        Z = W + lam * D.dot(D.T)
-        z = spsolve(Z, w * y)
-        w = p * (y > z) + (1 - p) * (y <= z)
+        Z = W + (lam * D_T_D)
+        z = spsolve(Z, w * y_arr)
+        w = p * (y_arr > z) + (1.0 - p) * (y_arr <= z)
+        
     return z
 
 def process_fid(fid_data: np.ndarray, dic: dict, solvent: str = "CDCl3", nucleus: str = "1H", spec_freq_mhz: float = 400.0) -> tuple:
+    """Processes raw time-domain signals with nucleus-specific referencing."""
+    fid = np.squeeze(fid_data)
     sw = dic.get("sw", spec_freq_mhz * 10.0)
-    data_em = ng.proc_base.em(fid_data, lb=0.5 / sw)
+    
+    # 1. Apodization & Zero-filling
+    data_em = ng.proc_base.em(fid, lb=0.5 / sw)
     data_zf = ng.proc_base.zf(data_em, pad=len(data_em))
+    
+    # 2. Fourier Transform & Autophasing
     complex_spec = ng.proc_base.fft(data_zf)
     phased = autophase_entropy(complex_spec)
-    baseline = baseline_als(phased)
+    
+    # 3. Baseline Correction
+    baseline = baseline_als(phased, lam=1e6, p=0.005)
     corrected = phased - baseline
 
+    # 4. PPM Axis Construction
     try:
-        udic = ng.jeol.guess_udic(dic, fid_data) if "jeol" in str(type(dic)).lower() else ng.bruker.guess_udic(dic, fid_data)
+        udic = ng.jeol.guess_udic(dic, fid) if "jeol" in str(type(dic)).lower() else ng.bruker.guess_udic(dic, fid)
         uc = ng.fileiobase.unit_conversion(udic[0]['size'], udic[0]['complex'], udic[0]['sw'], udic[0]['obs'], udic[0]['car'])
         raw_ppm = uc.ppm_scale()
     except Exception:
         raw_ppm = np.linspace(14.0 if nucleus == "1H" else 230.0, -2.0, len(corrected))
 
+    # 5. Solvent Lock Calibration
     ref = SOLVENT_TABLE.get(solvent, SOLVENT_TABLE["CDCl3"])
     target_ppm = ref.get(nucleus)
     tol = ref.get(f"{nucleus}_tol", 0.2)
@@ -191,10 +213,7 @@ def generate_predicted_spectrum(
     nucleus: str = "1H",
     num_points: int = 4000
 ) -> tuple:
-    """
-    Synthesizes a continuous 1D NMR spectrum from predicted shifts, integrals, and multiplicities.
-    Returns (ppm_axis, simulated_spectrum, annotations_list).
-    """
+    """Synthesizes a continuous 1D NMR spectrum from predicted shifts and multiplicities."""
     if pred_df.empty:
         ppm_axis = np.linspace(14.0, -1.0, num_points) if nucleus == "1H" else np.linspace(230.0, -10.0, num_points)
         return ppm_axis, np.zeros_like(ppm_axis), []
@@ -207,7 +226,7 @@ def generate_predicted_spectrum(
         ppm_min = max(-10.0, np.min(shifts) - 10.0)
         ppm_max = min(240.0, np.max(shifts) + 15.0)
 
-    ppm_axis = np.linspace(ppm_max, ppm_min, num_points)  # Reversed NMR axis
+    ppm_axis = np.linspace(ppm_max, ppm_min, num_points)
     sim_spectrum = np.zeros_like(ppm_axis)
     annotations = []
 
@@ -221,7 +240,6 @@ def generate_predicted_spectrum(
         mult = str(row.get("Mult", "s")).lower()
         lbl = str(row["Label"])
 
-        # Construct sub-peak splitting offsets in Hz
         if mult == "d":
             offsets_hz = [-3.8, 3.8]
             weights = [0.5, 0.5]
@@ -237,7 +255,7 @@ def generate_predicted_spectrum(
         elif mult == "br s":
             offsets_hz = [0.0]
             weights = [1.0]
-            gamma_eff = (2.5 / spec_freq_mhz) / 2.0
+            gamma = (2.5 / spec_freq_mhz) / 2.0
         else:
             offsets_hz = [0.0]
             weights = [1.0]
