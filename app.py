@@ -5,7 +5,10 @@ import matplotlib.pyplot as plt
 import nmrglue as ng
 from streamlit_ketcher import st_ketcher
 
-from dsp_engine import process_fid, filter_solvent_peaks, deconvolve_spectrum, SOLVENT_TABLE
+from dsp_engine import (
+    process_fid, filter_solvent_peaks, deconvolve_spectrum,
+    generate_predicted_spectrum, SOLVENT_TABLE
+)
 from chem_engine import analyze_and_number_molecule, draw_molecule_annotated
 from gnn_predictor import ShiftPredictor
 from assignment_engine import solve_assignment_2d
@@ -19,7 +22,7 @@ st.set_page_config(
 )
 
 st.title("🧪 Automated NMR Structure Elucidation & Assignment Platform")
-st.markdown("Automated 1D/2D NMR processing, GNN shift prediction, quantum spin simulation, and publication-grade reporting.")
+st.markdown("Automated 1D/2D NMR processing, in silico spectral synthesis, JEOL data ingestion, and publication-grade reporting.")
 
 @st.cache_resource
 def load_gnn_model():
@@ -28,25 +31,20 @@ def load_gnn_model():
 predictor = load_gnn_model()
 
 # -----------------------------------------------------------------------------
-# SIDEBAR: SOLVENT & DUAL FIELD FREQUENCY SELECTION
+# SIDEBAR: SPECTROMETER PARAMETERS
 # -----------------------------------------------------------------------------
 with st.sidebar:
     st.header("Spectrometer Parameters")
-    
-    # 1. Solvent Selection
     solvent = st.selectbox(
         "Deuterated Solvent:",
         list(SOLVENT_TABLE.keys()),
         index=0,
-        help="Select NMR solvent for automatic chemical shift calibration and solvent peak exclusion."
+        help="Select solvent for lock calibration and residual peak exclusion."
     )
-    
-    # Display reference shifts for clarity
     ref_data = SOLVENT_TABLE[solvent]
     st.caption(f"Ref Shifts: ¹H = {ref_data['1H']} ppm | ¹³C = {ref_data['13C']} ppm")
     st.divider()
 
-    # 2. Field Frequencies Selection (Proton and Carbon)
     st.subheader("Field Frequencies")
     freq_1h = st.number_input(
         "¹H Spectrometer Frequency (MHz):",
@@ -57,7 +55,6 @@ with st.sidebar:
         format="%.2f"
     )
 
-    # Carbon frequency: auto-calculated via gyromagnetic ratio (gamma_C / gamma_H ~ 0.25144)
     auto_c_freq = round(freq_1h * 0.25144, 2)
     sync_c = st.checkbox("Auto-link ¹³C Frequency (Larmor ratio)", value=True)
 
@@ -99,7 +96,7 @@ else:
 mol, mol_h, c_map, h_map, topo_2d, diastereotopic = analyze_and_number_molecule(active_smiles)
 
 if mol is None:
-    st.error("❌ Invalid chemical structure syntax. Please verify SMILES formatting or atom valencies.")
+    st.error("❌ Invalid chemical structure syntax. Please verify SMILES formatting.")
     st.stop()
 
 col_v1, col_v2 = st.columns(2)
@@ -111,43 +108,114 @@ with col_v2:
     st.image(c_img, caption="¹³C Carbon Numbering Map", use_container_width=True)
 
 if diastereotopic:
-    st.warning(f"⚠️ **Diastereotopic Protons Detected:** {', '.join([f'{a}/{b}' for a, b in diastereotopic])} — resolved as non-equivalent sites.")
+    st.warning(f"⚠️ **Diastereotopic Protons Detected:** {', '.join([f'{a}/{b}' for a, b in diastereotopic])}")
+
+# Compute In Silico Chemical Shift Predictions
+h_pred, c_pred = predictor.predict(mol_h, c_map, h_map, solvent=solvent)
 
 # -----------------------------------------------------------------------------
-# 2. SPECTROSCOPIC DATA INGESTION & DECONVOLUTION
+# 2. EXPERIMENTAL JEOL INGESTION
 # -----------------------------------------------------------------------------
-st.subheader("2. Spectrum Processing & Automated Deconvolution")
-in_mode = st.radio(
-    "Data Source Mode:",
-    ["Raw Spectrometer Data (JEOL .jdf)", "Manual Peak Entry / Table"],
-    horizontal=True
-)
+st.subheader("2. Experimental NMR File Ingestion")
+up_col1, up_col2 = st.columns([2, 1])
 
-exp_1h_peaks = []
-exp_13c_peaks = []
+exp_1h_peaks, exp_13c_peaks = [], []
+exp_ppm_axis, exp_spec = None, None
 
-if in_mode == "Raw Spectrometer Data (JEOL .jdf)":
-    up_fid = st.file_uploader("Upload JEOL Raw NMR Data (.jdf):", type=["jdf"])
+with up_col1:
+    up_fid = st.file_uploader(
+        "Upload JEOL Raw NMR Data File (.jdf):",
+        type=["jdf"],
+        help="Upload 1D FID/processed .jdf file from JEOL spectrometer."
+    )
     if up_fid:
-        with st.spinner("Executing FFT, Entropy Autophasing & Baseline Correction..."):
+        with st.spinner("Processing JEOL FID (FFT, Autophase & Whittaker Baseline)..."):
             with open("temp.jdf", "wb") as f:
                 f.write(up_fid.getbuffer())
             dic, raw = ng.jeol.read("temp.jdf")
-            ppm_axis, spec = process_fid(raw, dic, solvent=solvent, nucleus="1H", spec_freq_mhz=freq_1h)
+            exp_ppm_axis, exp_spec = process_fid(raw, dic, solvent=solvent, nucleus="1H", spec_freq_mhz=freq_1h)
 
-        with st.spinner(f"Deconvolving sub-peaks at {freq_1h:.1f} MHz and extracting J-couplings..."):
-            raw_multiplets = deconvolve_spectrum(ppm_axis, spec, spec_freq=freq_1h, nucleus="1H")
+        with st.spinner("Deconvolving overlapping sub-peaks and extracting J-couplings..."):
+            raw_multiplets = deconvolve_spectrum(exp_ppm_axis, exp_spec, spec_freq=freq_1h, nucleus="1H")
             exp_1h_peaks = filter_solvent_peaks(raw_multiplets, solvent=solvent, nucleus="1H")
 
         st.success(f"✅ Extracted {len(exp_1h_peaks)} real multiplets after {solvent} artifact filtering.")
 
-        fig, ax = plt.subplots(figsize=(10, 3.0), dpi=200)
-        ax.plot(ppm_axis, spec, color="#0B3C5D", lw=1.1, label=f"Processed Spectrum ({freq_1h:.1f} MHz)")
+with up_col2:
+    st.markdown("**Manual Fallback (Optional)**")
+    h_manual = st.text_input("¹H Peaks (ppm):", "11.00, 8.12, 7.62, 7.35, 7.15, 2.35")
+    if not exp_1h_peaks and h_manual:
+        exp_1h_peaks = [
+            {"ppm": float(x.strip()), "range": x.strip(), "multiplicity": "m", "protons": 1}
+            for x in h_manual.split(",") if x.strip()
+        ]
+
+# -----------------------------------------------------------------------------
+# 3. SIDE-BY-SIDE SPECTRA WINDOWS (PREDICTED VS EXPERIMENTAL JEOL)
+# -----------------------------------------------------------------------------
+st.subheader("3. Comparative NMR Spectra (In Silico Predicted vs. Experimental JEOL)")
+
+view_nucleus = st.radio("Select Nucleus to Display:", ["¹H NMR Spectrum", "¹³C NMR Spectrum"], horizontal=True)
+
+spec_col1, spec_col2 = st.columns(2)
+
+# === WINDOW 1: PREDICTED SPECTRUM (LEFT) ===
+with spec_col1:
+    st.markdown(f"#### 📊 In Silico Predicted {view_nucleus}")
+    
+    target_pred_df = h_pred if view_nucleus == "¹H NMR Spectrum" else c_pred
+    target_freq = freq_1h if view_nucleus == "¹H NMR Spectrum" else freq_13c
+    target_nuc = "1H" if view_nucleus == "¹H NMR Spectrum" else "13C"
+    
+    pred_ppm_axis, pred_sim_spec, pred_annotations = generate_predicted_spectrum(
+        pred_df=target_pred_df,
+        spec_freq_mhz=target_freq,
+        nucleus=target_nuc
+    )
+    
+    fig_pred, ax_pred = plt.subplots(figsize=(6.5, 3.6), dpi=200)
+    ax_pred.plot(pred_ppm_axis, pred_sim_spec, color="#0B3C5D", lw=1.2, label="Synthetic Lineshape")
+    
+    # Annotate predicted chemical shifts with atom labels
+    max_y_pred = np.max(pred_sim_spec) if len(pred_sim_spec) > 0 and np.max(pred_sim_spec) > 0 else 1.0
+    for ann in pred_annotations:
+        ax_pred.axvline(ann["ppm"], color="#0B3C5D", linestyle=":", alpha=0.35)
+        lbl_text = f"{ann['label']}\n{ann['ppm']:.2f}" if target_nuc == "1H" else f"{ann['label']}\n{ann['ppm']:.1f}"
+        ax_pred.annotate(
+            lbl_text,
+            xy=(ann["ppm"], max_y_pred * 0.72),
+            xytext=(0, 4),
+            textcoords="offset points",
+            ha="center",
+            fontsize=6.5,
+            rotation=90,
+            color="#0B3C5D",
+            fontweight="bold"
+        )
+        
+    ax_pred.set_xlim(max(pred_ppm_axis), min(pred_ppm_axis))  # Reversed NMR delta scale
+    ax_pred.set_xlabel("Chemical Shift δ (ppm)", fontweight="bold", fontsize=8)
+    ax_pred.set_ylabel("Peak Intensity (a.u.)", fontweight="bold", fontsize=8)
+    ax_pred.set_title(f"Predicted {target_nuc} Spectrum ({solvent}, {target_freq:.1f} MHz)", fontsize=9, fontweight="bold")
+    ax_pred.grid(True, linestyle="--", alpha=0.3)
+    ax_pred.legend(loc="upper left", fontsize=7.5)
+    plt.tight_layout()
+    st.pyplot(fig_pred)
+
+# === WINDOW 2: EXPERIMENTAL JEOL SPECTRUM (RIGHT) ===
+with spec_col2:
+    st.markdown(f"#### 📈 Uploaded JEOL Experimental {view_nucleus}")
+    
+    if exp_ppm_axis is not None and exp_spec is not None:
+        fig_exp, ax_exp = plt.subplots(figsize=(6.5, 3.6), dpi=200)
+        ax_exp.plot(exp_ppm_axis, exp_spec, color="#B82601", lw=1.1, label="JEOL Processed Spectrum")
+        
+        max_y_exp = np.max(exp_spec) if np.max(exp_spec) > 0 else 1.0
         for p in exp_1h_peaks:
-            ax.axvline(p["ppm"], color="#B82601", linestyle=":", alpha=0.5)
-            ax.annotate(
-                f"{p['ppm']:.2f}\n({p['multiplicity']})",
-                xy=(p["ppm"], np.max(spec) * 0.75),
+            ax_exp.axvline(p["ppm"], color="#B82601", linestyle=":", alpha=0.4)
+            ax_exp.annotate(
+                f"{p['ppm']:.2f}\n({p.get('multiplicity', 'm')})",
+                xy=(p["ppm"], max_y_exp * 0.72),
                 xytext=(0, 4),
                 textcoords="offset points",
                 ha="center",
@@ -156,48 +224,34 @@ if in_mode == "Raw Spectrometer Data (JEOL .jdf)":
                 color="#B82601",
                 fontweight="bold"
             )
-        ax.set_xlim(max(ppm_axis), min(ppm_axis))
-        ax.set_xlabel("Chemical Shift δ (ppm)", fontweight="bold", fontsize=8)
-        ax.set_ylabel("Intensity (a.u.)", fontsize=8)
-        ax.grid(True, linestyle="--", alpha=0.3)
-        ax.legend(loc="upper left", fontsize=8)
+            
+        ax_exp.set_xlim(max(exp_ppm_axis), min(exp_ppm_axis))  # Reversed NMR delta scale
+        ax_exp.set_xlabel("Chemical Shift δ (ppm)", fontweight="bold", fontsize=8)
+        ax_exp.set_ylabel("Peak Intensity (a.u.)", fontweight="bold", fontsize=8)
+        ax_exp.set_title(f"Experimental Spectrum ({solvent}, {freq_1h:.1f} MHz)", fontsize=9, fontweight="bold")
+        ax_exp.grid(True, linestyle="--", alpha=0.3)
+        ax_exp.legend(loc="upper left", fontsize=7.5)
         plt.tight_layout()
-        st.pyplot(fig)
-
-        with st.expander("📊 View Extracted Multiplets Table"):
-            st.dataframe(pd.DataFrame(exp_1h_peaks), use_container_width=True)
-
-else:
-    col_p1, col_p2 = st.columns(2)
-    with col_p1:
-        st.markdown(f"**¹H Peaks ({solvent}, {freq_1h:.1f} MHz)**")
-        h_raw = st.text_area(
-            "¹H Peaks (ppm, comma-separated):",
-            "11.00, 8.12, 7.62, 7.35, 7.15, 2.35"
-        )
-        if h_raw:
-            exp_1h_peaks = [
-                {"ppm": float(x.strip()), "range": x.strip(), "multiplicity": "m", "protons": 1}
-                for x in h_raw.split(",") if x.strip()
-            ]
-    with col_p2:
-        st.markdown(f"**¹³C Peaks ({solvent}, {freq_13c:.1f} MHz)**")
-        c_raw = st.text_area(
-            "¹³C Peaks (ppm, comma-separated):",
-            "170.1, 169.8, 151.2, 134.8, 132.4, 126.1, 123.9, 122.2, 20.9"
-        )
-        if c_raw:
-            exp_13c_peaks = [
-                {"ppm": float(x.strip())}
-                for x in c_raw.split(",") if x.strip()
-            ]
+        st.pyplot(fig_exp)
+    else:
+        # Placeholder window before file upload
+        fig_dummy, ax_dummy = plt.subplots(figsize=(6.5, 3.6), dpi=200)
+        dummy_ppm = np.linspace(14.0, -1.0, 500)
+        ax_dummy.plot(dummy_ppm, np.zeros_like(dummy_ppm), color="gray", linestyle="--", alpha=0.5, label="No Data Loaded")
+        ax_dummy.set_xlim(14.0, -1.0)
+        ax_dummy.set_xlabel("Chemical Shift δ (ppm)", fontweight="bold", fontsize=8)
+        ax_dummy.set_ylabel("Peak Intensity (a.u.)", fontweight="bold", fontsize=8)
+        ax_dummy.set_title("Experimental Spectrum (Awaiting .jdf Upload)", fontsize=9, color="gray")
+        ax_dummy.text(6.5, 0.5, "Upload a JEOL .jdf file\nin Section 2 to display", ha="center", va="center", color="gray", fontsize=9)
+        ax_dummy.grid(True, linestyle="--", alpha=0.2)
+        plt.tight_layout()
+        st.pyplot(fig_dummy)
 
 # -----------------------------------------------------------------------------
-# 3. GNN SHIFT PREDICTION & 2D BIPARTITE ASSIGNMENT
+# 4. STRUCTURE ELUCIDATION & 2D BIPARTITE ASSIGNMENT MATRICES
 # -----------------------------------------------------------------------------
-st.subheader("3. Structure Elucidation & Assignment Matrices")
+st.subheader("4. Structure Elucidation & Assignment Matrices")
 
-h_pred, c_pred = predictor.predict(mol_h, c_map, h_map, solvent=solvent)
 df_1h_res, df_13c_res = solve_assignment_2d(h_pred, c_pred, exp_1h_peaks, exp_13c_peaks, topo_2d)
 
 col_t1, col_t2 = st.columns(2)
@@ -209,10 +263,10 @@ with col_t2:
     st.dataframe(df_13c_res, use_container_width=True)
 
 # -----------------------------------------------------------------------------
-# 4. QUANTUM MECHANICAL SPIN SIMULATOR
+# 5. QUANTUM MECHANICAL SPIN SIMULATOR (EXPANDER)
 # -----------------------------------------------------------------------------
 with st.expander("🔬 Quantum Mechanical Spin System Simulator (AB / ABX Systems)", expanded=False):
-    st.caption("Simulates second-order strong coupling (roof effect) using the isotropic Hamiltonian.")
+    st.caption("Simulates second-order strong coupling effects (the roof effect) by diagonalizing the isotropic spin Hamiltonian matrix.")
     qc1, qc2 = st.columns([1, 2])
     with qc1:
         q_shifts = st.text_input("Coupled Spins δ (ppm):", "3.00, 3.03")
@@ -238,9 +292,9 @@ with st.expander("🔬 Quantum Mechanical Spin System Simulator (AB / ABX System
             st.error(f"Simulation error: {str(e)}")
 
 # -----------------------------------------------------------------------------
-# 5. PUBLICATION-READY PDF REPORT EXPORT
+# 6. PUBLICATION-READY PDF REPORT EXPORT
 # -----------------------------------------------------------------------------
-st.subheader("4. Analytical PDF Report Export")
+st.subheader("5. Analytical PDF Report Export")
 
 if st.button("📄 Generate Analytical PDF Report", type="primary", use_container_width=True):
     with st.spinner("Compiling publication-ready PDF document..."):
