@@ -114,10 +114,10 @@ if diastereotopic:
 h_pred, c_pred = predictor.predict(mol_h, c_map, h_map, solvent=solvent)
 
 # -----------------------------------------------------------------------------
-# 2. EXPERIMENTAL JEOL INGESTION
+# 2. EXPERIMENTAL NMR FILE INGESTION & MANUAL PEAKS
 # -----------------------------------------------------------------------------
 st.subheader("2. Experimental NMR File Ingestion")
-up_col1, up_col2 = st.columns([2, 1])
+up_col1, up_col2 = st.columns([1.5, 1.5])
 
 exp_1h_peaks, exp_13c_peaks = [], []
 exp_ppm_axis, exp_spec = None, None
@@ -142,12 +142,19 @@ with up_col1:
         st.success(f"✅ Extracted {len(exp_1h_peaks)} real multiplets after {solvent} artifact filtering.")
 
 with up_col2:
-    st.markdown("**Manual Fallback (Optional)**")
-    h_manual = st.text_input("¹H Peaks (ppm):", "11.00, 8.12, 7.62, 7.35, 7.15, 2.35")
-    if not exp_1h_peaks and h_manual:
+    st.markdown("**Manual Peak Entry / Fallback**")
+    h_manual = st.text_area("¹H Peaks (ppm, comma-separated):", "11.00, 8.12, 7.62, 7.35, 7.15, 2.35")
+    c_manual = st.text_area("¹³C Peaks (ppm, comma-separated):", "170.1, 169.8, 151.2, 134.8, 132.4, 126.1, 123.9, 122.2, 20.9")
+    
+    if not exp_1h_peaks and h_manual.strip():
         exp_1h_peaks = [
-            {"ppm": float(x.strip()), "range": x.strip(), "multiplicity": "m", "protons": 1}
+            {"ppm": float(x.strip()), "range": f"{float(x.strip()):.2f}", "multiplicity": "m", "protons": 1}
             for x in h_manual.split(",") if x.strip()
+        ]
+    if not exp_13c_peaks and c_manual.strip():
+        exp_13c_peaks = [
+            {"ppm": float(x.strip())}
+            for x in c_manual.split(",") if x.strip()
         ]
 
 # -----------------------------------------------------------------------------
@@ -189,7 +196,7 @@ for ann in pred_annotations:
         fontweight="bold"
     )
 
-ax_pred.set_xlim(max(pred_ppm_axis), min(pred_ppm_axis))  # Reversed NMR delta scale
+ax_pred.set_xlim(max(pred_ppm_axis), min(pred_ppm_axis))
 ax_pred.set_xlabel("Chemical Shift δ (ppm)", fontweight="bold", fontsize=8)
 ax_pred.set_ylabel("Peak Intensity (a.u.)", fontweight="bold", fontsize=8)
 ax_pred.set_title(f"Predicted {target_nuc} Spectrum ({solvent}, {target_freq:.1f} MHz)", fontsize=9, fontweight="bold")
@@ -222,7 +229,7 @@ if exp_ppm_axis is not None and exp_spec is not None:
             fontweight="bold"
         )
         
-    ax_exp.set_xlim(max(exp_ppm_axis), min(exp_ppm_axis))  # Reversed NMR delta scale
+    ax_exp.set_xlim(max(exp_ppm_axis), min(exp_ppm_axis))
     ax_exp.set_xlabel("Chemical Shift δ (ppm)", fontweight="bold", fontsize=8)
     ax_exp.set_ylabel("Peak Intensity (a.u.)", fontweight="bold", fontsize=8)
     ax_exp.set_title(f"Experimental Spectrum ({solvent}, {freq_1h:.1f} MHz)", fontsize=9, fontweight="bold")
@@ -244,7 +251,7 @@ else:
     st.pyplot(fig_dummy)
 
 # -----------------------------------------------------------------------------
-# 4. STRUCTURE ELUCIDATION & 2D BIPARTITE ASSIGNMENT MATRICES
+# 4. STRUCTURE ELUCIDATION & ASSIGNMENT MATRICES
 # -----------------------------------------------------------------------------
 st.subheader("4. Structure Elucidation & Assignment Matrices")
 
