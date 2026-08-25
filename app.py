@@ -151,101 +151,97 @@ with up_col2:
         ]
 
 # -----------------------------------------------------------------------------
-# 3. SIDE-BY-SIDE SPECTRA WINDOWS (PREDICTED VS EXPERIMENTAL JEOL)
+# 3. ABOVE-AND-BELOW COMPARATIVE SPECTRA WINDOWS
 # -----------------------------------------------------------------------------
 st.subheader("3. Comparative NMR Spectra (In Silico Predicted vs. Experimental JEOL)")
 
 view_nucleus = st.radio("Select Nucleus to Display:", ["¹H NMR Spectrum", "¹³C NMR Spectrum"], horizontal=True)
 
-spec_col1, spec_col2 = st.columns(2)
+target_pred_df = h_pred if view_nucleus == "¹H NMR Spectrum" else c_pred
+target_freq = freq_1h if view_nucleus == "¹H NMR Spectrum" else freq_13c
+target_nuc = "1H" if view_nucleus == "¹H NMR Spectrum" else "13C"
 
-# === WINDOW 1: PREDICTED SPECTRUM (LEFT) ===
-with spec_col1:
-    st.markdown(f"#### 📊 In Silico Predicted {view_nucleus}")
-    
-    target_pred_df = h_pred if view_nucleus == "¹H NMR Spectrum" else c_pred
-    target_freq = freq_1h if view_nucleus == "¹H NMR Spectrum" else freq_13c
-    target_nuc = "1H" if view_nucleus == "¹H NMR Spectrum" else "13C"
-    
-    pred_ppm_axis, pred_sim_spec, pred_annotations = generate_predicted_spectrum(
-        pred_df=target_pred_df,
-        spec_freq_mhz=target_freq,
-        nucleus=target_nuc
+pred_ppm_axis, pred_sim_spec, pred_annotations = generate_predicted_spectrum(
+    pred_df=target_pred_df,
+    spec_freq_mhz=target_freq,
+    nucleus=target_nuc
+)
+
+# === TOP WINDOW: IN SILICO PREDICTED SPECTRUM ===
+st.markdown(f"#### 📊 In Silico Predicted {view_nucleus} (Top Window)")
+
+fig_pred, ax_pred = plt.subplots(figsize=(10, 3.2), dpi=200)
+ax_pred.plot(pred_ppm_axis, pred_sim_spec, color="#0B3C5D", lw=1.2, label="Synthetic In Silico Lineshape")
+
+max_y_pred = np.max(pred_sim_spec) if len(pred_sim_spec) > 0 and np.max(pred_sim_spec) > 0 else 1.0
+for ann in pred_annotations:
+    ax_pred.axvline(ann["ppm"], color="#0B3C5D", linestyle=":", alpha=0.35)
+    lbl_text = f"{ann['label']}\n{ann['ppm']:.2f}" if target_nuc == "1H" else f"{ann['label']}\n{ann['ppm']:.1f}"
+    ax_pred.annotate(
+        lbl_text,
+        xy=(ann["ppm"], max_y_pred * 0.72),
+        xytext=(0, 4),
+        textcoords="offset points",
+        ha="center",
+        fontsize=6.5,
+        rotation=90,
+        color="#0B3C5D",
+        fontweight="bold"
     )
+
+ax_pred.set_xlim(max(pred_ppm_axis), min(pred_ppm_axis))  # Reversed NMR delta scale
+ax_pred.set_xlabel("Chemical Shift δ (ppm)", fontweight="bold", fontsize=8)
+ax_pred.set_ylabel("Peak Intensity (a.u.)", fontweight="bold", fontsize=8)
+ax_pred.set_title(f"Predicted {target_nuc} Spectrum ({solvent}, {target_freq:.1f} MHz)", fontsize=9, fontweight="bold")
+ax_pred.grid(True, linestyle="--", alpha=0.3)
+ax_pred.legend(loc="upper left", fontsize=7.5)
+plt.tight_layout()
+st.pyplot(fig_pred)
+
+st.divider()
+
+# === BOTTOM WINDOW: UPLOADED JEOL EXPERIMENTAL SPECTRUM ===
+st.markdown(f"#### 📈 Uploaded JEOL Experimental {view_nucleus} (Bottom Window)")
+
+if exp_ppm_axis is not None and exp_spec is not None:
+    fig_exp, ax_exp = plt.subplots(figsize=(10, 3.2), dpi=200)
+    ax_exp.plot(exp_ppm_axis, exp_spec, color="#B82601", lw=1.1, label="JEOL Processed Spectrum")
     
-    fig_pred, ax_pred = plt.subplots(figsize=(6.5, 3.6), dpi=200)
-    ax_pred.plot(pred_ppm_axis, pred_sim_spec, color="#0B3C5D", lw=1.2, label="Synthetic Lineshape")
-    
-    # Annotate predicted chemical shifts with atom labels
-    max_y_pred = np.max(pred_sim_spec) if len(pred_sim_spec) > 0 and np.max(pred_sim_spec) > 0 else 1.0
-    for ann in pred_annotations:
-        ax_pred.axvline(ann["ppm"], color="#0B3C5D", linestyle=":", alpha=0.35)
-        lbl_text = f"{ann['label']}\n{ann['ppm']:.2f}" if target_nuc == "1H" else f"{ann['label']}\n{ann['ppm']:.1f}"
-        ax_pred.annotate(
-            lbl_text,
-            xy=(ann["ppm"], max_y_pred * 0.72),
+    max_y_exp = np.max(exp_spec) if np.max(exp_spec) > 0 else 1.0
+    for p in exp_1h_peaks:
+        ax_exp.axvline(p["ppm"], color="#B82601", linestyle=":", alpha=0.4)
+        ax_exp.annotate(
+            f"{p['ppm']:.2f}\n({p.get('multiplicity', 'm')})",
+            xy=(p["ppm"], max_y_exp * 0.72),
             xytext=(0, 4),
             textcoords="offset points",
             ha="center",
             fontsize=6.5,
             rotation=90,
-            color="#0B3C5D",
+            color="#B82601",
             fontweight="bold"
         )
         
-    ax_pred.set_xlim(max(pred_ppm_axis), min(pred_ppm_axis))  # Reversed NMR delta scale
-    ax_pred.set_xlabel("Chemical Shift δ (ppm)", fontweight="bold", fontsize=8)
-    ax_pred.set_ylabel("Peak Intensity (a.u.)", fontweight="bold", fontsize=8)
-    ax_pred.set_title(f"Predicted {target_nuc} Spectrum ({solvent}, {target_freq:.1f} MHz)", fontsize=9, fontweight="bold")
-    ax_pred.grid(True, linestyle="--", alpha=0.3)
-    ax_pred.legend(loc="upper left", fontsize=7.5)
+    ax_exp.set_xlim(max(exp_ppm_axis), min(exp_ppm_axis))  # Reversed NMR delta scale
+    ax_exp.set_xlabel("Chemical Shift δ (ppm)", fontweight="bold", fontsize=8)
+    ax_exp.set_ylabel("Peak Intensity (a.u.)", fontweight="bold", fontsize=8)
+    ax_exp.set_title(f"Experimental Spectrum ({solvent}, {freq_1h:.1f} MHz)", fontsize=9, fontweight="bold")
+    ax_exp.grid(True, linestyle="--", alpha=0.3)
+    ax_exp.legend(loc="upper left", fontsize=7.5)
     plt.tight_layout()
-    st.pyplot(fig_pred)
-
-# === WINDOW 2: EXPERIMENTAL JEOL SPECTRUM (RIGHT) ===
-with spec_col2:
-    st.markdown(f"#### 📈 Uploaded JEOL Experimental {view_nucleus}")
-    
-    if exp_ppm_axis is not None and exp_spec is not None:
-        fig_exp, ax_exp = plt.subplots(figsize=(6.5, 3.6), dpi=200)
-        ax_exp.plot(exp_ppm_axis, exp_spec, color="#B82601", lw=1.1, label="JEOL Processed Spectrum")
-        
-        max_y_exp = np.max(exp_spec) if np.max(exp_spec) > 0 else 1.0
-        for p in exp_1h_peaks:
-            ax_exp.axvline(p["ppm"], color="#B82601", linestyle=":", alpha=0.4)
-            ax_exp.annotate(
-                f"{p['ppm']:.2f}\n({p.get('multiplicity', 'm')})",
-                xy=(p["ppm"], max_y_exp * 0.72),
-                xytext=(0, 4),
-                textcoords="offset points",
-                ha="center",
-                fontsize=6.5,
-                rotation=90,
-                color="#B82601",
-                fontweight="bold"
-            )
-            
-        ax_exp.set_xlim(max(exp_ppm_axis), min(exp_ppm_axis))  # Reversed NMR delta scale
-        ax_exp.set_xlabel("Chemical Shift δ (ppm)", fontweight="bold", fontsize=8)
-        ax_exp.set_ylabel("Peak Intensity (a.u.)", fontweight="bold", fontsize=8)
-        ax_exp.set_title(f"Experimental Spectrum ({solvent}, {freq_1h:.1f} MHz)", fontsize=9, fontweight="bold")
-        ax_exp.grid(True, linestyle="--", alpha=0.3)
-        ax_exp.legend(loc="upper left", fontsize=7.5)
-        plt.tight_layout()
-        st.pyplot(fig_exp)
-    else:
-        # Placeholder window before file upload
-        fig_dummy, ax_dummy = plt.subplots(figsize=(6.5, 3.6), dpi=200)
-        dummy_ppm = np.linspace(14.0, -1.0, 500)
-        ax_dummy.plot(dummy_ppm, np.zeros_like(dummy_ppm), color="gray", linestyle="--", alpha=0.5, label="No Data Loaded")
-        ax_dummy.set_xlim(14.0, -1.0)
-        ax_dummy.set_xlabel("Chemical Shift δ (ppm)", fontweight="bold", fontsize=8)
-        ax_dummy.set_ylabel("Peak Intensity (a.u.)", fontweight="bold", fontsize=8)
-        ax_dummy.set_title("Experimental Spectrum (Awaiting .jdf Upload)", fontsize=9, color="gray")
-        ax_dummy.text(6.5, 0.5, "Upload a JEOL .jdf file\nin Section 2 to display", ha="center", va="center", color="gray", fontsize=9)
-        ax_dummy.grid(True, linestyle="--", alpha=0.2)
-        plt.tight_layout()
-        st.pyplot(fig_dummy)
+    st.pyplot(fig_exp)
+else:
+    fig_dummy, ax_dummy = plt.subplots(figsize=(10, 2.5), dpi=200)
+    dummy_ppm = np.linspace(14.0, -1.0, 500)
+    ax_dummy.plot(dummy_ppm, np.zeros_like(dummy_ppm), color="gray", linestyle="--", alpha=0.5, label="No Data Loaded")
+    ax_dummy.set_xlim(14.0, -1.0)
+    ax_dummy.set_xlabel("Chemical Shift δ (ppm)", fontweight="bold", fontsize=8)
+    ax_dummy.set_ylabel("Peak Intensity (a.u.)", fontweight="bold", fontsize=8)
+    ax_dummy.set_title("Experimental Spectrum (Awaiting .jdf Upload)", fontsize=9, color="gray")
+    ax_dummy.text(6.5, 0.5, "Upload a JEOL .jdf file in Section 2 to display experimental spectrum", ha="center", va="center", color="gray", fontsize=9)
+    ax_dummy.grid(True, linestyle="--", alpha=0.2)
+    plt.tight_layout()
+    st.pyplot(fig_dummy)
 
 # -----------------------------------------------------------------------------
 # 4. STRUCTURE ELUCIDATION & 2D BIPARTITE ASSIGNMENT MATRICES
