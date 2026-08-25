@@ -5,42 +5,20 @@ from scipy.optimize import minimize, curve_fit
 from scipy.signal import find_peaks
 import nmrglue as ng
 
-# Comprehensive solvent chemical shift reference library (ppm)
 SOLVENT_TABLE = {
-    "CDCl3": {
-        "1H": 7.26, "13C": 77.16, "water_1H": 1.56,
-        "1H_tol": 0.15, "13C_tol": 1.5
-    },
-    "DMSO-d6": {
-        "1H": 2.50, "13C": 39.52, "water_1H": 3.33,
-        "1H_tol": 0.15, "13C_tol": 1.5
-    },
-    "Methanol-d4": {
-        "1H": 3.31, "13C": 49.00, "water_1H": 4.87,
-        "1H_tol": 0.15, "13C_tol": 1.5
-    },
-    "Acetone-d6": {
-        "1H": 2.05, "13C": 29.84, "water_1H": 2.84,
-        "1H_tol": 0.15, "13C_tol": 1.5
-    },
-    "D2O": {
-        "1H": 4.79, "13C": None, "water_1H": 4.79,
-        "1H_tol": 0.25, "13C_tol": 0.0
-    },
-    "CD3CN": {
-        "1H": 1.94, "13C": 1.32, "water_1H": 2.13,
-        "1H_tol": 0.15, "13C_tol": 1.5
-    },
-    "Benzene-d6": {
-        "1H": 7.16, "13C": 128.06, "water_1H": 0.40,
-        "1H_tol": 0.15, "13C_tol": 1.5
-    },
-    "Pyridine-d5": {
-        "1H": 7.22, "13C": 123.87, "water_1H": 4.90,
-        "1H_tol": 0.20, "13C_tol": 1.5
-    }
+    "CDCl3": {"1H": 7.26, "13C": 77.16, "water_1H": 1.56, "1H_tol": 0.15, "13C_tol": 1.5},
+    "DMSO-d6": {"1H": 2.50, "13C": 39.52, "water_1H": 3.33, "1H_tol": 0.15, "13C_tol": 1.5},
+    "Methanol-d4": {"1H": 3.31, "13C": 49.00, "water_1H": 4.87, "1H_tol": 0.15, "13C_tol": 1.5},
+    "Acetone-d6": {"1H": 2.05, "13C": 29.84, "water_1H": 2.84, "1H_tol": 0.15, "13C_tol": 1.5},
+    "D2O": {"1H": 4.79, "13C": None, "water_1H": 4.79, "1H_tol": 0.25, "13C_tol": 0.0},
+    "CD3CN": {"1H": 1.94, "13C": 1.32, "water_1H": 2.13, "1H_tol": 0.15, "13C_tol": 1.5},
+    "Benzene-d6": {"1H": 7.16, "13C": 128.06, "water_1H": 0.40, "1H_tol": 0.15, "13C_tol": 1.5},
+    "Pyridine-d5": {"1H": 7.22, "13C": 123.87, "water_1H": 4.90, "1H_tol": 0.20, "13C_tol": 1.5}
 }
 
+# -----------------------------------------------------------------------------
+# 1. FID PROCESSING & DSP
+# -----------------------------------------------------------------------------
 def apply_phase(data: np.ndarray, p0: float, p1: float) -> np.ndarray:
     n = len(data)
     phase_ramp = np.linspace(0, np.radians(p1), n) + np.radians(p0)
@@ -71,7 +49,6 @@ def baseline_als(y: np.ndarray, lam: float = 1e6, p: float = 0.005, niter: int =
     return z
 
 def process_fid(fid_data: np.ndarray, dic: dict, solvent: str = "CDCl3", nucleus: str = "1H", spec_freq_mhz: float = 400.0) -> tuple:
-    """Processes raw time-domain signals with nucleus-specific referencing."""
     sw = dic.get("sw", spec_freq_mhz * 10.0)
     data_em = ng.proc_base.em(fid_data, lb=0.5 / sw)
     data_zf = ng.proc_base.zf(data_em, pad=len(data_em))
@@ -116,6 +93,9 @@ def filter_solvent_peaks(peaks: list, solvent: str = "CDCl3", nucleus: str = "1H
         clean.append(p)
     return clean
 
+# -----------------------------------------------------------------------------
+# 2. EXPERIMENTAL MULTIPLET DECONVOLUTION
+# -----------------------------------------------------------------------------
 def multi_lorentzian(x, *params):
     y = np.zeros_like(x)
     n_peaks = (len(params) - 1) // 3
@@ -201,3 +181,79 @@ def deconvolve_spectrum(ppm_axis: np.ndarray, spectrum: np.ndarray, spec_freq: f
         })
 
     return results
+
+# -----------------------------------------------------------------------------
+# 3. PREDICTED 1D SYNTHETIC SPECTRUM GENERATOR
+# -----------------------------------------------------------------------------
+def generate_predicted_spectrum(
+    pred_df,
+    spec_freq_mhz: float = 400.0,
+    nucleus: str = "1H",
+    num_points: int = 4000
+) -> tuple:
+    """
+    Synthesizes a continuous 1D NMR spectrum from predicted shifts, integrals, and multiplicities.
+    Returns (ppm_axis, simulated_spectrum, annotations_list).
+    """
+    if pred_df.empty:
+        ppm_axis = np.linspace(14.0, -1.0, num_points) if nucleus == "1H" else np.linspace(230.0, -10.0, num_points)
+        return ppm_axis, np.zeros_like(ppm_axis), []
+
+    shifts = pred_df["Shift"].values
+    if nucleus == "1H":
+        ppm_min = max(-1.0, np.min(shifts) - 1.5)
+        ppm_max = min(15.0, np.max(shifts) + 1.5)
+    else:
+        ppm_min = max(-10.0, np.min(shifts) - 10.0)
+        ppm_max = min(240.0, np.max(shifts) + 15.0)
+
+    ppm_axis = np.linspace(ppm_max, ppm_min, num_points)  # Reversed NMR axis
+    sim_spectrum = np.zeros_like(ppm_axis)
+    annotations = []
+
+    fwhm_hz = 0.8 if nucleus == "1H" else 1.5
+    fwhm_ppm = fwhm_hz / spec_freq_mhz
+    gamma = fwhm_ppm / 2.0
+
+    for _, row in pred_df.iterrows():
+        c_shift = float(row["Shift"])
+        protons = float(row.get("Protons", 1.0))
+        mult = str(row.get("Mult", "s")).lower()
+        lbl = str(row["Label"])
+
+        # Construct sub-peak splitting offsets in Hz
+        if mult == "d":
+            offsets_hz = [-3.8, 3.8]
+            weights = [0.5, 0.5]
+        elif mult == "t":
+            offsets_hz = [-7.0, 0.0, 7.0]
+            weights = [0.25, 0.5, 0.25]
+        elif mult == "q":
+            offsets_hz = [-10.5, -3.5, 3.5, 10.5]
+            weights = [0.125, 0.375, 0.375, 0.125]
+        elif mult == "dd":
+            offsets_hz = [-4.8, -3.2, 3.2, 4.8]
+            weights = [0.25, 0.25, 0.25, 0.25]
+        elif mult == "br s":
+            offsets_hz = [0.0]
+            weights = [1.0]
+            gamma_eff = (2.5 / spec_freq_mhz) / 2.0
+        else:
+            offsets_hz = [0.0]
+            weights = [1.0]
+
+        gamma_use = gamma if mult != "br s" else (2.5 / spec_freq_mhz) / 2.0
+
+        for off_hz, w in zip(offsets_hz, weights):
+            sub_ppm = c_shift + (off_hz / spec_freq_mhz)
+            area = protons * w
+            sim_spectrum += area * (1.0 / np.pi) * (gamma_use / ((ppm_axis - sub_ppm)**2 + gamma_use**2))
+
+        annotations.append({
+            "label": lbl,
+            "ppm": c_shift,
+            "mult": mult,
+            "protons": int(protons) if nucleus == "1H" else None
+        })
+
+    return ppm_axis, sim_spectrum, annotations
