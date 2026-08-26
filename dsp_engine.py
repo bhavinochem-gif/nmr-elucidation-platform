@@ -38,16 +38,12 @@ def autophase_entropy(complex_spec: np.ndarray) -> np.ndarray:
     return np.real(apply_phase(complex_spec, res.x[0], res.x[1]))
 
 def baseline_als(y: np.ndarray, lam: float = 1e6, p: float = 0.005, niter: int = 10) -> np.ndarray:
-    """
-    Whittaker baseline estimation using Asymmetric Least Squares smoothing.
-    Corrected sparse matrix dimensions: D is (L-2, L), D.T.dot(D) is (L, L).
-    """
+    """Whittaker baseline estimation with aligned (L, L) matrix dimensions."""
     y_arr = np.asarray(y, dtype=np.float64).flatten()
     L = len(y_arr)
     if L < 3:
         return np.zeros_like(y_arr)
 
-    # D is (L-2, L), so D.T @ D is (L, L) matching W
     D = sp.diags([1.0, -2.0, 1.0], [0, 1, 2], shape=(L - 2, L), format="csc")
     D_T_D = D.T.dot(D)
 
@@ -61,7 +57,7 @@ def baseline_als(y: np.ndarray, lam: float = 1e6, p: float = 0.005, niter: int =
     return z
 
 def process_fid(fid_data: np.ndarray, dic: dict, solvent: str = "CDCl3", nucleus: str = "1H", spec_freq_mhz: float = 400.0) -> tuple:
-    """Processes raw time-domain signals with nucleus-specific referencing."""
+    """Processes raw time-domain signals with exact ppm scale synchronization."""
     fid = np.squeeze(fid_data)
     sw = dic.get("sw", spec_freq_mhz * 10.0)
     
@@ -75,15 +71,21 @@ def process_fid(fid_data: np.ndarray, dic: dict, solvent: str = "CDCl3", nucleus
     
     # 3. Baseline Correction
     baseline = baseline_als(phased, lam=1e6, p=0.005)
-    corrected = phased - baseline
+    corrected = np.asarray(phased - baseline, dtype=np.float64)
+    n_points = len(corrected)
 
-    # 4. PPM Axis Construction
+    # 4. Corrected PPM Axis Construction
     try:
         udic = ng.jeol.guess_udic(dic, fid) if "jeol" in str(type(dic)).lower() else ng.bruker.guess_udic(dic, fid)
-        uc = ng.fileiobase.unit_conversion(udic[0]['size'], udic[0]['complex'], udic[0]['sw'], udic[0]['obs'], udic[0]['car'])
-        raw_ppm = uc.ppm_scale()
+        # Construct unit conversion using the actual post-FFT array size
+        uc = ng.fileiobase.unit_conversion(n_points, False, udic[0]['sw'], udic[0]['obs'], udic[0]['car'])
+        raw_ppm = np.asarray(uc.ppm_scale(), dtype=np.float64)
     except Exception:
-        raw_ppm = np.linspace(14.0 if nucleus == "1H" else 230.0, -2.0, len(corrected))
+        raw_ppm = np.linspace(14.0 if nucleus == "1H" else 230.0, -2.0, n_points)
+
+    # Hard synchronization guarantee
+    if len(raw_ppm) != n_points:
+        raw_ppm = np.linspace(raw_ppm[0], raw_ppm[-1], n_points)
 
     # 5. Solvent Lock Calibration
     ref = SOLVENT_TABLE.get(solvent, SOLVENT_TABLE["CDCl3"])
@@ -152,16 +154,28 @@ def extract_j_couplings(sub_peaks: list) -> tuple:
     return "m", [round(float(abs(freqs[-1] - freqs[0])), 2)], center_ppm
 
 def deconvolve_spectrum(ppm_axis: np.ndarray, spectrum: np.ndarray, spec_freq: float = 400.0, nucleus: str = "1H") -> list:
-    threshold = np.max(spectrum) * (0.03 if nucleus == "1H" else 0.05)
+    ppm_arr = np.asarray(ppm_axis, dtype=np.float64).flatten()
+    spec_arr = np.asarray(spectrum, dtype=np.float64).flatten()
+
+    # Ensure absolute length matching before indexing
+    if len(ppm_arr) != len(spec_arr):
+        ppm_arr = np.linspace(ppm_arr[0], ppm_arr[-1], len(spec_arr))
+
+    threshold = np.max(spec_arr) * (0.03 if nucleus == "1H" else 0.05)
     cluster_gap = 0.08 if nucleus == "1H" else 1.0
     
-    p_indices, _ = find_peaks(spectrum, height=threshold, distance=4)
+    p_indices, _ = find_peaks(spec_arr, height=threshold, distance=4)
+    if len(p_indices) == 0:
+        return []
+
+    # Safeguard: clamp peak indices within ppm bounds
+    p_indices = p_indices[p_indices < len(ppm_arr)]
     if len(p_indices) == 0:
         return []
 
     clusters, curr = [], [p_indices[0]]
     for i in range(1, len(p_indices)):
-        if abs(ppm_axis[p_indices[i]] - ppm_axis[p_indices[i-1]]) <= cluster_gap:
+        if abs(ppm_arr[p_indices[i]] - ppm_arr[p_indices[i-1]]) <= cluster_gap:
             curr.append(p_indices[i])
         else:
             clusters.append(curr)
@@ -169,15 +183,17 @@ def deconvolve_spectrum(ppm_axis: np.ndarray, spectrum: np.ndarray, spec_freq: f
     clusters.append(curr)
 
     results = []
-    hz_axis = ppm_axis * spec_freq
+    hz_axis = ppm_arr * spec_freq
 
     for cl in clusters:
-        mn, mx = max(0, min(cl) - 20), min(len(ppm_axis), max(cl) + 20)
-        if mn > mx:
-            mn, mx = mx, mn
-        p_sub = ppm_axis[mn:mx]
+        mn = max(0, min(cl) - 20)
+        mx = min(len(ppm_arr), max(cl) + 20)
+        if mn >= mx:
+            continue
+
+        p_sub = ppm_arr[mn:mx]
         h_sub = hz_axis[mn:mx]
-        s_sub = spectrum[mn:mx]
+        s_sub = spec_arr[mn:mx]
 
         sub_pks, _ = find_peaks(s_sub, prominence=np.max(s_sub) * 0.05)
         init = []
@@ -213,7 +229,6 @@ def generate_predicted_spectrum(
     nucleus: str = "1H",
     num_points: int = 4000
 ) -> tuple:
-    """Synthesizes a continuous 1D NMR spectrum from predicted shifts and multiplicities."""
     if pred_df.empty:
         ppm_axis = np.linspace(14.0, -1.0, num_points) if nucleus == "1H" else np.linspace(230.0, -10.0, num_points)
         return ppm_axis, np.zeros_like(ppm_axis), []
